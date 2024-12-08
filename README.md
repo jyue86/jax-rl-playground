@@ -1,1 +1,1 @@
-# jax-playground
+# jax-rl-playground
