@@ -1,5 +1,6 @@
-# vscode
+# project-specific files 
 .vscode/
+results/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -1,3 +1,10 @@
-jax[gpu]
+jax[cuda12]
+flax
+optax
+distrax
 matplotlib
 tyro
+brax
+wandb
+evosax
+pygame
