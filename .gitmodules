@@ -1,3 +1,4 @@
 [submodule "third-party/gymnax"]
 	path = third-party/gymnax
 	url = git@github.com:lebrice/gymnax.git
+	branch = fix-classic-control-rendering
