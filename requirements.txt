@@ -1,4 +1,4 @@
-jax[cuda12]
+jax[cuda]
 flax
 optax
 distrax
@@ -6,5 +6,8 @@ matplotlib
 tyro
 brax
 wandb
-evosax
-pygame
+mujoco
+mujoco_mjx
+mediapy
+IPython
+playground

@@ -1,0 +1,22 @@
+[project]
+name = "jax-playground"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "brax>=0.12.3",
+    "distrax>=0.1.5",
+    "flax>=0.10.6",
+    "ipykernel>=6.29.5",
+    "ipython>=9.2.0",
+    "jax[cuda]>=0.6.0",
+    "matplotlib>=3.10.3",
+    "mediapy>=1.2.4",
+    "mujoco>=3.3.2",
+    "mujoco-mjx>=3.3.2",
+    "optax>=0.2.4",
+    "playground>=0.0.4",
+    "tyro>=0.9.20",
+    "wandb>=0.19.11",
+]
