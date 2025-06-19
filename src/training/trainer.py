@@ -5,10 +5,8 @@ import optax
 
 class Trainer(ABC):
     @abstractmethod
-    def __init__(self, env: "Env", model: nnx.Module, optimizer: "optax.Optim", config: dataclass):
+    def __init__(self, env: "Env", config: dataclass):
         self.env = env
-        self.model = model
-        self.optimizer = optimizer
         self.config = config 
 
     @abstractmethod
