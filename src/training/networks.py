@@ -3,7 +3,7 @@ from typing import List, Tuple
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from distrax import Normal
+from distrax import Normal, Distribution
 
 class SimpleMLP(nnx.Module):
     def __init__(self, layers: List[int], rng: nnx.Rngs, activation: str = "relu",):
@@ -28,7 +28,7 @@ class ActorCritic(nnx.Module):
         self.critic = SimpleMLP(critic_layers, rng=rng)
         self.std = nnx.Param(jnp.ones(action_dim) * 0.5, name="std")
 
-    def __call__(self, x: jax.Array, rng: jax.Array):
+    def __call__(self, x: jax.Array, rng: jax.Array) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         mean = self.actor(x)
         value = self.critic(x) 
         action_dist = Normal(loc=mean, scale=self.std.value)
@@ -37,11 +37,11 @@ class ActorCritic(nnx.Module):
         entropy = action_dist.entropy()
         return action, value, log_prob, entropy
 
-    def take_deterministic_action(self, x):
+    def take_deterministic_action(self, x) -> jax.Array:
         action = self.actor(x)
         return action
     
-    def get_updated_dist(self, x):
+    def get_updated_dist(self, x) -> Distribution:
         mean = self.actor(x)
-        action_dist = Normal(loc=mean, scale=self.std)
+        action_dist = Normal(loc=mean, scale=self.std.value)
         return action_dist

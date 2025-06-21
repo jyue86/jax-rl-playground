@@ -1,7 +1,5 @@
 from abc import ABC, abstractmethod
-from flax import nnx
 from flax.struct import dataclass
-import optax
 
 class Trainer(ABC):
     @abstractmethod

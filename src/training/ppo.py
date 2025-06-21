@@ -4,6 +4,7 @@ from .networks import SimpleMLP, ActorCritic
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from flax.training import train_state
 from flax.struct import dataclass
 import optax
 
@@ -24,14 +25,17 @@ class PPOConfig:
     entropy_weight: float = 0.01
     hidden_layers: Tuple[int,...] = (64, 64)
 
+class TrainState(train_state.TrainState):
+    graphdef: nnx.GraphDef
+
 @dataclass
-class EnvState:
+class RolloutState:
     key: jax.Array
     prev_obs: jax.Array
 
-@dataclass
-class UpdateState:
+class UpdateState(train_state.TrainState):
     key: jax.Array
+    graphdef: nnx.GraphDef
     loss: jax.Array
 
 @dataclass
@@ -40,14 +44,13 @@ class Transition:
     action: jax.Array
     reward: jax.Array
     value: jax.Array
-    next_obs: jax.Array
     done: jax.Array
     log_prob: jax.Array
 
 class PPO(Trainer):
     # TODO: consider making a model a string as well?
     # Basically, make it consistent with optimizer
-    def __init__(self, env: "Env", config: dataclass):
+    def __init__(self, env: "Env", config: PPOConfig):
         super().__init__(env, config)
 
     def make_train(self):
@@ -56,7 +59,16 @@ class PPO(Trainer):
             n_obs = self.env.observation_size
             n_actions = self.env.action_size
             model = ActorCritic(obs_dim=n_obs, action_dim=n_actions, hidden_layers=self.config.hidden_layers, rng=rng)
-            optimizer = nnx.Optimizer(model, optax.adam(learning_rate=self.config.lr))
+            graphdef, params = nnx.split(model, nnx.Param)
+            optimizer = optax.adam(learning_rate=self.config.lr)
+            train_state = TrainState.create(
+                apply_fn=None,
+                graphdef=graphdef,
+                params=params,
+                tx=optimizer
+            )
+            del params
+            # optimizer = nnx.Optimizer(model, optax.adam(learning_rate=self.config.lr))
 
             key = jax.random.PRNGKey(self.config.seed)
             vmap_reset = jax.vmap(self.env.reset)
@@ -64,32 +76,34 @@ class PPO(Trainer):
             n_updates = self.config.training_steps // (self.config.n_envs * self.config.episode_length)
             minibatch_size = self.config.n_envs * self.config.episode_length // self.config.n_minibatches
 
-            def update_step(key: jax.Array, _):
+            def update_step(runner_state: Tuple[jax.Array, TrainState, jax.Array], _):
+                key, train_state, avg_loss = runner_state
                 key, _key = jax.random.split(key, 2)
                 reset_keys = jax.random.split(_key, self.config.n_envs)
                 obs = vmap_reset(reset_keys)
 
-                def env_step(env_state: EnvState, _):
-                    key = env_state.key
-                    prev_obs = env_state.prev_obs
+                rollout_model = nnx.merge(train_state.graphdef, train_state.params)
+                def env_step(rollout_state: RolloutState, _):
+                    key = rollout_state.key
+                    prev_obs = rollout_state.prev_obs
                     key, _key = jax.random.split(key, 2)
 
-                    action, value, log_prob, _ = model(prev_obs.obs, rng=_key)
+                    action, value, log_prob, _ = rollout_model(prev_obs.obs, rng=_key)
+                    # jax.debug.breakpoint()
                     next_obs = vmap_step(prev_obs, action)
-                    next_env_state = EnvState(key=key, prev_obs=next_obs)
+                    next_env_state = RolloutState(key, next_obs)
 
                     return next_env_state, Transition(
                         obs=prev_obs.obs,
                         action=action,
                         reward=next_obs.reward,
                         value=value,
-                        next_obs=next_obs.obs,
                         done=next_obs.done,
                         log_prob=log_prob
                     ) 
 
-                final_env_state, rollouts = jax.lax.scan(env_step, EnvState(key, obs), length=self.config.episode_length)
-                key = final_env_state.key
+                final_rollout_state, rollouts = jax.lax.scan(env_step, RolloutState(key, obs), length=self.config.episode_length)
+                key = final_rollout_state.key
                 rollouts = jax.tree.map(lambda x: jnp.swapaxes(x, 0, 1), rollouts)
                 vmap_calculate_gae_and_targets = jax.vmap(self.calculate_gae_and_targets)
                 gaes, targets = vmap_calculate_gae_and_targets(
@@ -105,9 +119,16 @@ class PPO(Trainer):
                 # rewards = (T, n_envs, 1)
                 # values = (T, n_envs, 1)
                 # entropy = (T, n_envs, 1)
-                # next_obs = (T, n_envs, S)
                 # dones = (T, n_envs, 1)
                 # log_prob = (T, n_envs, 1)
+                assert rollouts.obs.shape == (self.config.n_envs, self.config.episode_length, n_obs), f"Observation shape mismatch, actual: {rollouts.obs.shape}, expected: {(self.config.n_envs, self.config.episode_length, n_obs)}"
+                assert rollouts.action.shape == (self.config.n_envs, self.config.episode_length, n_actions), f"Action shape mismatch, actual: {rollouts.action.shape}, expected: {(self.config.n_envs, self.config.episode_length, n_actions)}"
+                assert rollouts.reward.shape == (self.config.n_envs, self.config.episode_length), f"Reward shape mismatch, actual: {rollouts.reward.shape}, expected: {(self.config.n_envs, self.config.episode_length)}"
+                assert rollouts.value.shape == (self.config.n_envs, self.config.episode_length, 1), f"Value shape mismatch, actual: {rollouts.value.shape}, expected: {(self.config.n_envs, self.config.episode_length, 1)}"
+                assert rollouts.done.shape == (self.config.n_envs, self.config.episode_length), f"Done shape mismatch, actual: {rollouts.done.shape}, expected: {(self.config.n_envs, self.config.episode_length)}"
+                assert rollouts.log_prob.shape == (self.config.n_envs, self.config.episode_length, 1), f"Log probability shape mismatch, actual: {rollouts.log_prob.shape}, expected: {(self.config.n_envs, self.config.episode_length, 1)}"
+                assert gaes.shape == (self.config.n_envs, self.config.episode_length, 1), f"GAE shape mismatch, actual: {gaes.shape}, expected: {(self.config.n_envs, self.config.episode_length, 1)}"
+                assert targets.shape == (self.config.n_envs, self.config.episode_length, 1), f"Targets shape mismatch, actual: {targets.shape}, expected: {(self.config.n_envs, self.config.episode_length, 1)}"
 
                 batch = (rollouts, gaes, targets)
                 # rollouts = jax.tree.map(lambda x: x.reshape((-1, x.shape[-1])), batch)
@@ -116,36 +137,39 @@ class PPO(Trainer):
                 permutation = jax.random.permutation(_key, jnp.arange(self.config.n_minibatches))
                 shuffled_minibatches = jax.tree.map(lambda x: x[permutation], minibatches)
 
-                def update_policy(update_state_and_minibatches: Tuple[UpdateState, Tuple], current_epoch: int):
-                    update_state, minibatches = update_state_and_minibatches
-                    start_key = update_state.key
-                    update_loss = update_state.loss
-                    def minibatch_update(minibatch_update_state: UpdateState, minibatch: jax.Array):
-                        current_loss = minibatch_update_state.loss
-                        key = minibatch_update_state.key
+                def update_policy(update_state: Tuple[jax.Array, TrainState, Tuple, jax.Array], current_epoch: int):
+                    key, train_state, epoch_minibatches, update_loss = update_state 
+                    def minibatch_update(minibatch_update_state: Tuple[jax.Array, TrainState, jax.Array], minibatch: jax.Array):
+                        key, train_state, current_epoch_loss = minibatch_update_state
+                        graphdef = train_state.graphdef
+                        model = nnx.merge(graphdef, train_state.params)
+
                         key, _key = jax.random.split(key, 2)
                         loss, grads = nnx.value_and_grad(self.loss_fn)(model, minibatch, _key)
-                        optimizer.update(grads)
+                        train_state = train_state.apply_gradients(grads=grads)
                         # TODO: remove second return value, make it None?
-                        return UpdateState(key=key, loss=current_loss + loss), loss 
-                    end_of_epoch_state, _ = jax.lax.scan(minibatch_update, UpdateState(key=start_key, loss=jnp.zeros((1,))), minibatches)
-                    total_loss = end_of_epoch_state.update_loss
-                    end_key = end_of_epoch_state.key
-                    avg_epoch_loss = total_loss / self.config.n_minibatches
-                    return UpdateState(key=end_key, loss=update_loss + total_loss), avg_epoch_loss
+                        return (key, train_state, current_epoch_loss + loss), loss 
 
-                update_state = UpdateState(key=key, loss=jnp.zeros((1,)))
+                    epoch_loss = jnp.zeros((1,))
+                    next_update_state, _ = jax.lax.scan(minibatch_update, (key, train_state, epoch_loss), epoch_minibatches)
+                    key, train_state, total_loss = next_update_state
+                    avg_epoch_loss = total_loss / self.config.n_minibatches
+                    next_update_state = (key, train_state, shuffled_minibatches, update_loss + avg_epoch_loss)
+                    return next_update_state, avg_epoch_loss
+
+                loss = jnp.zeros((1,))
                 end_of_update_state, avg_epoch_losses = jax.lax.scan(
                     update_policy,
-                    (update_state, shuffled_minibatches),
+                    (key, train_state, shuffled_minibatches, loss),
                     length=self.config.epochs
                 )
-                total_update_loss = update_state.loss 
-                key = end_of_update_state.key
+                key, train_state, _, total_update_loss = end_of_update_state
                 avg_update_loss = total_update_loss / self.config.epochs
-                return key, avg_update_loss 
+                return (key, train_state, avg_update_loss), None
 
-            key, loss = jax.lax.scan(update_step, key, length=n_updates)
+            avg_update_loss = jnp.zeros((1,))
+            train_state, loss = jax.lax.scan(update_step, (key, train_state, avg_update_loss), length=n_updates)
+            return train_state
         return train
 
     def evaluate(self, n_episodes: int):
@@ -188,6 +212,7 @@ class PPO(Trainer):
 
         # normalize advantages
         gaes = (gaes - jnp.mean(gaes)) / (jnp.std(gaes) + 1e-8)
+        # jax.debug.print("rollout obs shape: {x}", x=rollouts.obs.shape)
         _, values, _, entropy = model(rollouts.obs, rng=rng)
         
         # Calculate policy loss
@@ -204,7 +229,7 @@ class PPO(Trainer):
 
         # calculate value loss
         value_loss = jnp.mean((values - targets) ** 2)
-        jax.debug.breakpoint()
+        # jax.debug.breakpoint()
         loss = policy_loss + value_loss
 
         return loss
