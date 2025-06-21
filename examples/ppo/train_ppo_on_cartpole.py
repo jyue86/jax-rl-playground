@@ -19,12 +19,6 @@ def create_env():
     env = registry.load("CartpoleBalance")
     return env
 
-def create_model(n_obs, n_actions):
-    rng = nnx.Rngs(0)
-    hidden_layers = [512, 256, 128]
-    model = ActorCritic(obs_dim=n_obs, action_dim=n_actions, hidden_layers=hidden_layers, rng=rng)
-    return model
-
 if __name__ == "__main__":
     args = parse_args()
     env = create_env()
@@ -32,8 +26,6 @@ if __name__ == "__main__":
     n_actions = env.action_size
 
     config = PPOConfig(hidden_layers=(512, 256, 128))
-    model = create_model(n_obs, n_actions)
-    optimizer = nnx.Optimizer(model, optax.adam(learning_rate=config.lr))
     ppo_trainer = PPO(env, config)
     train = ppo_trainer.make_train()
     jit_train = nnx.jit(train)
