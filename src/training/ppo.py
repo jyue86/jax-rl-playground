@@ -3,6 +3,7 @@ from .networks import ActorCritic
 
 import jax
 import jax.numpy as jnp
+from jax_tqdm import scan_tqdm
 from flax import nnx
 from flax.training import train_state
 from flax.struct import dataclass
@@ -81,7 +82,8 @@ class PPO(Trainer):
             n_updates = self.config.training_steps // (self.config.n_envs * self.config.episode_length)
             minibatch_size = self.config.n_envs * self.config.episode_length // self.config.n_minibatches
 
-            def update_step(runner_state: Tuple[jax.Array, TrainState, jax.Array], _):
+            @scan_tqdm(n=n_updates, desc="Training PPO")
+            def update_step(runner_state: Tuple[jax.Array, TrainState, jax.Array], progress_i: int):
                 key, train_state, avg_loss = runner_state
                 key, _key = jax.random.split(key, 2)
                 reset_keys = jax.random.split(_key, self.config.n_envs)
@@ -169,10 +171,10 @@ class PPO(Trainer):
                 )
                 key, train_state, _, total_update_loss = end_of_update_state
                 avg_update_loss = total_update_loss / self.config.epochs
-                return (key, train_state, avg_update_loss), None
+                return (key, train_state, avg_update_loss), progress_i + 1 
 
             avg_update_loss = jnp.zeros((1,))
-            train_state, loss = jax.lax.scan(update_step, (key, train_state, avg_update_loss), length=n_updates)
+            train_state, loss = jax.lax.scan(update_step, (key, train_state, avg_update_loss), jnp.arange(n_updates))
             return train_state
         return train
 
