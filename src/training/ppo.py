@@ -1,5 +1,5 @@
 from .trainer import Trainer
-from .networks import SimpleMLP, ActorCritic
+from .networks import ActorCritic
 
 import jax
 import jax.numpy as jnp
@@ -8,7 +8,7 @@ from flax.training import train_state
 from flax.struct import dataclass
 import optax
 
-from typing import Tuple, List
+from typing import Tuple, Any
 
 @dataclass
 class PPOConfig:
@@ -16,7 +16,7 @@ class PPOConfig:
     training_steps: int = 1_000_000
     n_envs: int = 8
     eps: float = 0.2
-    n_minibatches: int = 128
+    n_minibatches: int = 32 
     episode_length: int = 512 
     epochs: int = 10
     gamma: float = 0.99
@@ -46,6 +46,11 @@ class Transition:
     value: jax.Array
     done: jax.Array
     log_prob: jax.Array
+
+@dataclass
+class EvalResult:
+    reward: jax.Array
+    done: jax.Array
 
 class PPO(Trainer):
     # TODO: consider making a model a string as well?
@@ -147,7 +152,6 @@ class PPO(Trainer):
                         key, _key = jax.random.split(key, 2)
                         loss, grads = nnx.value_and_grad(self.loss_fn)(model, minibatch, _key)
                         train_state = train_state.apply_gradients(grads=grads)
-                        # TODO: remove second return value, make it None?
                         return (key, train_state, current_epoch_loss + loss), loss 
 
                     epoch_loss = jnp.zeros((1,))
@@ -172,8 +176,27 @@ class PPO(Trainer):
             return train_state
         return train
 
-    def evaluate(self, n_episodes: int):
-        pass
+    def evaluate(self, key: jax.Array, n_episodes: int, train_state: TrainState):
+        assert n_episodes % self.config.n_envs == 0, "Number of episodes must be divisible by the number of environments"
+        eval_steps = n_episodes // self.config.n_envs
+        vmap_reset = jax.vmap(self.env.reset)
+        vmap_step = jax.vmap(self.env.step)
+        model = nnx.merge(train_state.graphdef, train_state.params)
+
+        def evaluate_loop(key: jax.Array, _):
+            key, reset_keys = jax.random.split(key, self.config.n_envs + 1)
+            obs = vmap_reset(reset_keys)
+            def evaluate_episode(prev_obs, _):
+                action = model.take_deterministic_action(prev_obs.obs)
+                obs = vmap_step(action)
+                return obs, EvalResult(reward=obs.reward, done=obs.done)
+            _, eval_results = jax.lax.scan(evaluate_episode, obs, length = self.config.episode_length)
+            return key, eval_results
+        key, eval_results = jax.lax.scan(evaluate_loop, key, length=eval_steps)
+        eval_results = jax.tree.map(lambda x: x.reshape((x.shape[0] * x.shape[1],) + x.shape[2:]), eval_results)
+        valid_indices = jnp.where(eval_results.done)[0]
+        valid_rewards = eval_results.reward[valid_indices]
+        return jnp.mean(valid_rewards), jnp.std(valid_rewards)
     
     def calculate_gae_and_targets(self, rewards: jax.Array, values: jax.Array, dones: jax.Array):
         T = self.config.episode_length
@@ -212,24 +235,21 @@ class PPO(Trainer):
 
         # normalize advantages
         gaes = (gaes - jnp.mean(gaes)) / (jnp.std(gaes) + 1e-8)
-        # jax.debug.print("rollout obs shape: {x}", x=rollouts.obs.shape)
         _, values, _, entropy = model(rollouts.obs, rng=rng)
         
         # Calculate policy loss
-        dist = model.get_updated_dist(rollouts.obs)
+        dist = model.get_updated_dist(rollouts.obs) 
         minibatch_log_probs = dist.log_prob(rollouts.action)
         ratio = jnp.exp(minibatch_log_probs - rollouts.log_prob)
         clipped_ratio = jnp.clip(ratio, 1 - self.config.eps, 1 + self.config.eps)
-        # jax.debug.print("Ratio shape: {x}", x=(ratio * gaes).shape)
-        # jax.debug.print("Clipped ratio shape: {x}", x=(clipped_ratio * gaes).shape)
         ratios = jnp.concat([ratio * gaes, clipped_ratio * gaes], axis=1)
-        # assert ratio.shape == gaes.shape, "Ratio and GAEs must have the same shape"
-        # assert clipped_ratio.shape == gaes.shape, "Clipped ratio and GAEs must have the same shape"
+        assert ratio.shape == gaes.shape, "Ratio and GAEs must have the same shape"
+        assert clipped_ratio.shape == gaes.shape, "Clipped ratio and GAEs must have the same shape"
         policy_loss = -jnp.mean(jnp.min(ratios, axis=1)) - self.config.entropy_weight * jnp.mean(entropy)
 
         # calculate value loss
         value_loss = jnp.mean((values - targets) ** 2)
-        # jax.debug.breakpoint()
-        loss = policy_loss + value_loss
+        entropy_loss = self.config.entropy_weight * jnp.mean(entropy)
+        loss = policy_loss + value_loss - entropy_loss
 
         return loss
