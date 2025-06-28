@@ -1,26 +1,19 @@
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
-RUN apt update && apt install -y \
-    python3 \
-    python3-pip \
-    python3-venv \
-    git \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    ffmpeg
+RUN apt-get update && apt-get install -y \
+      python3 python3-pip python3-venv git \
+      libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev ffmpeg
 
-ENV UV_LINK_MODE=copy
-ENV UV_PROJECT_ENV=/.venv
+RUN pip3 install --no-cache-dir uv
 
-RUN pip3 install uv
+ENV VENV_PATH=/opt/venv
+ENV UV_PROJECT_ENVIRONMENT=${VENV_PATH}
+ENV PATH=${VENV_PATH}/bin:$PATH       
+ENV VIRTUAL_ENV=${VENV_PATH}          
 
-COPY ./requirements.txt /tmp/requirements.txt
-RUN uv venv --python 3.11 ${UV_PROJECT_ENV}
-# Note that syncing will install only the packages listed in requirements.txt
-# Running `uv run python3` will install the other dependencies supporting said packages
-RUN uv pip sync /tmp/requirements.txt
+WORKDIR /app          
 
-WORKDIR /app
+COPY pyproject.toml uv.lock* ./
+
+RUN uv venv --python 3.11 \
+ && (uv sync --locked || uv sync)     
